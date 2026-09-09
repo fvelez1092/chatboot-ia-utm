@@ -1,4 +1,4 @@
-import { create } from "@open-wa/wa-automate";
+import { create, ev } from "@open-wa/wa-automate";
 import fs from "fs";
 import path from "path";
 import logger from "./logger.js";
@@ -11,8 +11,44 @@ const {
     IGNORE_GROUPS = "true",
 } = process.env;
 
+const runtime = {
+    status: "idle",
+    rawState: null,
+    qr: null,
+    lastError: null,
+    updatedAt: new Date().toISOString(),
+};
+
+function updateRuntime(values) {
+    Object.assign(runtime, values, { updatedAt: new Date().toISOString() });
+}
+
+ev.on("qr.**", (qrCode, sessionId) => {
+    if (sessionId && sessionId !== SESSION_ID) return;
+    updateRuntime({
+        status: "waiting_qr",
+        qr: qrCode,
+        lastError: null,
+    });
+});
+
+export function getWAStatus() {
+    return {
+        status: runtime.status,
+        rawState: runtime.rawState,
+        qrAvailable: Boolean(runtime.qr),
+        lastError: runtime.lastError,
+        updatedAt: runtime.updatedAt,
+    };
+}
+
+export function getLatestQR() {
+    return runtime.qr;
+}
+
 export async function initWA(startCallback) {
     if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+    updateRuntime({ status: "initializing", lastError: null });
 
     const options = {
         sessionId: SESSION_ID,
@@ -23,70 +59,92 @@ export async function initWA(startCallback) {
         killProcessOnBrowserClose: false,
         authTimeout: 60,
         qrTimeout: 0,
+        qrLogSkip: true,
         disableSpins: true,
         cacheEnabled: false,
         restartOnCrash: startCallback,
     };
 
-    const client = await create(options);
+    try {
+        const client = await create(options);
+        updateRuntime({
+            status: "connected",
+            rawState: "CONNECTED",
+            qr: null,
+            lastError: null,
+        });
 
-    client.onStateChanged((state) => {
-        logger.info({ state }, "WA state changed");
-        if (["CONFLICT", "UNLAUNCHED"].includes(state)) client.forceRefocus();
-    });
+        client.onStateChanged((state) => {
+            logger.info({ state }, "WA state changed");
 
-    client.onMessage(async (message) => {
-        try {
-            // 1) Ignorar mensajes propios y de grupos (si se configuró)
-            if (message.fromMe) return;
-
-            if (message.isGroupMsg && IGNORE_GROUPS === "true") {
-                // opcional: sólo responde si te mencionan; si no, sal del handler
+            if (state === "CONNECTED") {
+                updateRuntime({ status: "connected", rawState: state, qr: null, lastError: null });
                 return;
             }
-
-            const chatId = message.from;
-            const bodyRaw = (message.body || "").trim();
-            const lower = bodyRaw.toLowerCase();
-
-            // 2) Saludos rápidos
-            const isGreeting = /^(hola|buenas|buenos dias|buenos días|buenas tardes|buenas noches|hi|hello)\b/.test(lower);
-            if (isGreeting) {
-                await client.sendText(chatId, "¡Hola! Soy tu asistente de IA 🤖. Estoy listo para ayudarte.");
+            if (["UNPAIRED", "UNPAIRED_IDLE"].includes(state)) {
+                updateRuntime({ status: "waiting_qr", rawState: state });
                 return;
             }
-
-            // 3) Acuse de recibo INMEDIATO (importante por tiempos 4–10 min)
-            await client.sendText(
-                chatId,
-                "✅ Recibí tu consulta. Estoy procesándolo con el motor de IA; esto puede tardar unos minutos…"
-            );
-
-            // 4) Llamada al agente (con reintentos y timeout 10 min)
-            let answer = await askAgent(bodyRaw, { nContext: 4 });
-
-            // 5) Fallback si llega “No lo sé”
-            if (!answer || /^no lo sé\.?$/i.test(answer)) {
-                answer = "No encontré esa información en la base de conocimiento. ¿Puedes darme más detalle o reformular la consulta?";
+            if (["CONFLICT", "UNLAUNCHED"].includes(state)) {
+                updateRuntime({ status: "reconnecting", rawState: state });
+                client.forceRefocus();
+                return;
             }
+            updateRuntime({ status: "disconnected", rawState: state });
+        });
 
-            // 6) Entregar respuesta final
-            await client.sendText(chatId, answer);
-
-        } catch (e) {
-            logger.error({ err: e?.response?.data || e.message }, "onMessage error");
+        client.onMessage(async (message) => {
             try {
+                if (message.fromMe) return;
+                if (message.isGroupMsg && IGNORE_GROUPS === "true") return;
+
+                const chatId = message.from;
+                const bodyRaw = (message.body || "").trim();
+                const lower = bodyRaw.toLowerCase();
+                if (!bodyRaw) return;
+
+                const isGreeting = /^(hola|buenas|buenos dias|buenos días|buenas tardes|buenas noches|hi|hello)\b/.test(lower);
+                if (isGreeting) {
+                    await client.sendText(chatId, "¡Hola! Soy tu asistente de IA 🤖. Estoy listo para ayudarte.");
+                    return;
+                }
+
                 await client.sendText(
-                    message.from,
-                    "⚠️ Ocurrió un error consultando el servidor de IA. Intenta nuevamente más tarde."
+                    chatId,
+                    "✅ Recibí tu consulta. Estoy procesándola con el motor de IA; esto puede tardar unos minutos…"
                 );
-            } catch { }
-        }
-    });
 
-    async function sendText(to, text) {
-        return client.sendText(to, text);
+                let answer = await askAgent(bodyRaw, { nContext: 4 });
+                if (!answer || /^no lo sé\.?$/i.test(answer)) {
+                    answer = "No encontré esa información en la base de conocimiento. ¿Puedes darme más detalle o reformular la consulta?";
+                }
+
+                await client.sendText(chatId, answer);
+            } catch (error) {
+                logger.error({ err: error?.response?.data || error.message }, "onMessage error");
+                try {
+                    await client.sendText(
+                        message.from,
+                        "⚠️ Ocurrió un error consultando el servidor de IA. Intenta nuevamente más tarde."
+                    );
+                } catch {
+                    // El cliente también puede estar desconectado.
+                }
+            }
+        });
+
+        return {
+            client,
+            sendText(to, text) {
+                return client.sendText(to, text);
+            },
+        };
+    } catch (error) {
+        updateRuntime({
+            status: "error",
+            qr: null,
+            lastError: error.message,
+        });
+        throw error;
     }
-
-    return { client, sendText };
 }
