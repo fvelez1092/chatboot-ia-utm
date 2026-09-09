@@ -1,14 +1,19 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import fs from "fs";
+import jwt from "jsonwebtoken";
 import logger from "./logger.js";
-import { getWAStatus, getLatestQR, initWA } from "./wa.js";
+import { getWAStatus, getLatestQR, initWA, markDisconnected } from "./wa.js";
 import { errorHandler } from "./middlewares/error.js";
 
 const {
     HOST = "0.0.0.0",
     PORT = 5005,
     FRONTEND_ORIGINS = "http://localhost:5173,http://localhost:3000",
+    JWT_PUBLIC_KEY,
+    JWT_PUBLIC_KEY_PATH,
+    AUTO_START = "false",
 } = process.env;
 
 const allowedOrigins = FRONTEND_ORIGINS.split(",")
@@ -33,6 +38,35 @@ app.use(express.json({ limit: "100kb" }));
 
 let wa = null;
 let waStartPromise = null;
+
+function readPublicKey() {
+    if (JWT_PUBLIC_KEY) return JWT_PUBLIC_KEY.replace(/\\n/g, "\n");
+    if (JWT_PUBLIC_KEY_PATH) return fs.readFileSync(JWT_PUBLIC_KEY_PATH, "utf8");
+    throw new Error("Configure JWT_PUBLIC_KEY o JWT_PUBLIC_KEY_PATH");
+}
+
+function adminRequired(req, _res, next) {
+    try {
+        const header = req.get("Authorization") || "";
+        const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+        if (!token) {
+            const error = new Error("Token de acceso requerido");
+            error.status = 401;
+            throw error;
+        }
+        const claims = jwt.verify(token, readPublicKey(), { algorithms: ["RS256"] });
+        if (claims.role !== "admin") {
+            const error = new Error("Se requieren permisos de administrador");
+            error.status = 403;
+            throw error;
+        }
+        req.auth = claims;
+        return next();
+    } catch (error) {
+        if (!error.status) error.status = 401;
+        return next(error);
+    }
+}
 
 function startWA() {
     if (wa) return Promise.resolve(wa);
@@ -84,6 +118,8 @@ app.get("/health", (_req, res) => {
     });
 });
 
+app.use("/api", adminRequired);
+
 app.get("/api/whatsapp/status", (_req, res) => {
     res.set("Cache-Control", "no-store");
     res.json({ ok: true, data: getWAStatus() });
@@ -117,6 +153,21 @@ app.post("/api/whatsapp/connect", (_req, res) => {
         message: "Conexión de WhatsApp iniciada",
         data: getWAStatus(),
     });
+});
+
+app.post("/api/whatsapp/disconnect", async (_req, res, next) => {
+    try {
+        if (wa?.client) {
+            await wa.client.logout();
+            await wa.client.kill();
+        }
+        wa = null;
+        waStartPromise = null;
+        markDisconnected();
+        return res.json({ ok: true, data: getWAStatus() });
+    } catch (error) {
+        return next(error);
+    }
 });
 
 app.post("/api/send-text", async (req, res, next) => {
@@ -153,9 +204,11 @@ app.use(errorHandler);
 
 app.listen(Number(PORT), HOST, () => {
     logger.info(`[WA Relay] HTTP ON: http://${HOST}:${PORT}`);
-    void startWA().catch((error) => {
-        logger.error({ err: error.message }, "Failed to start Open-WA");
-    });
+    if (AUTO_START === "true") {
+        void startWA().catch((error) => {
+            logger.error({ err: error.message }, "Failed to start Open-WA");
+        });
+    }
 });
 
 process.on("SIGINT", () => {

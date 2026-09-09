@@ -46,6 +46,15 @@ export function getLatestQR() {
     return runtime.qr;
 }
 
+export function markDisconnected() {
+    updateRuntime({
+        status: "idle",
+        rawState: null,
+        qr: null,
+        lastError: null,
+    });
+}
+
 export async function initWA(startCallback) {
     if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
     updateRuntime({ status: "initializing", lastError: null });

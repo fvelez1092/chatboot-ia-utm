@@ -12,6 +12,12 @@ npm run dev
 
 Configure `FRONTEND_ORIGINS` con los orígenes permitidos, separados por comas. En producción no use `*`.
 
+El servicio valida el mismo JWT RS256 emitido por `api_ia_utm`. Configure
+`JWT_PUBLIC_KEY_PATH` con la ruta absoluta de `jwt-public.pem`. Cree además un
+usuario activo para el bot y coloque sus credenciales en `AGENT_USERNAME` y
+`AGENT_PASSWORD`; estas credenciales se usan únicamente de servidor a servidor
+para consultar `/rag/ask` y nunca se envían al navegador.
+
 ## API para el frontend
 
 | Método | Ruta | Uso |
@@ -20,7 +26,11 @@ Configure `FRONTEND_ORIGINS` con los orígenes permitidos, separados por comas. 
 | `GET` | `/api/whatsapp/status` | Estado de conexión y disponibilidad del QR |
 | `GET` | `/api/whatsapp/qr` | QR como data URL para mostrar en una imagen |
 | `POST` | `/api/whatsapp/connect` | Inicia la conexión o generación del QR |
+| `POST` | `/api/whatsapp/disconnect` | Cierra la sesión vinculada |
 | `POST` | `/api/send-text` | Envía un mensaje |
+
+Todas las rutas `/api/*` requieren `Authorization: Bearer <token>` y el rol
+`admin`. El endpoint `/health` permanece público para comprobaciones operativas.
 
 El frontend debe consultar el estado periódicamente. Cuando `qrAvailable` sea `true`, puede obtener el QR y asignar `data.qr` al atributo `src` de una imagen.
 
