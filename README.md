@@ -15,14 +15,11 @@ npm run dev
 
 Configure `FRONTEND_ORIGINS` con los orígenes permitidos, separados por comas. En producción no use `*`.
 
-El servicio valida el mismo JWT RS256 emitido por `api_ia_utm` para proteger
-las rutas administrativas del panel. Configure `JWT_PUBLIC_KEY_PATH` con la
-ruta absoluta de `jwt-public.pem`.
-
-Temporalmente, la comunicación del bot con `/rag/ask` puede funcionar sin
-credenciales usando `AGENT_AUTH_ENABLED=false`. Cuando se reactive la seguridad,
-use `AGENT_AUTH_ENABLED=true` y configure `AGENT_USERNAME` y
-`AGENT_PASSWORD`.
+El servicio valida el mismo JWT RS256 emitido por `api_ia_utm`. Configure
+`JWT_PUBLIC_KEY_PATH` con la ruta absoluta de `jwt-public.pem`. Cree además un
+usuario activo para el bot y coloque sus credenciales en `AGENT_USERNAME` y
+`AGENT_PASSWORD`; estas credenciales se usan únicamente de servidor a servidor
+para consultar `/rag/ask` y nunca se envían al navegador.
 
 ## API para el frontend
 
