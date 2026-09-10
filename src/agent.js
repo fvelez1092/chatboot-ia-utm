@@ -6,11 +6,13 @@ const {
     AGENT_LOGIN_URL = "http://localhost:5000/auth/login",
     AGENT_USERNAME,
     AGENT_PASSWORD,
+    AGENT_AUTH_ENABLED = "false",
     AGENT_TIMEOUT_MS = 600000,
     RETRY_ATTEMPTS = 2,
     RETRY_BASE_MS = 5000,
 } = process.env;
 
+const authEnabled = AGENT_AUTH_ENABLED.toLowerCase() === "true";
 let accessToken = null;
 
 async function authenticate() {
@@ -28,26 +30,31 @@ async function authenticate() {
     return token;
 }
 
+function postQuestion(payload, token = null) {
+    const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
+    return axios.post(AGENT_URL, payload, {
+        timeout: Number(AGENT_TIMEOUT_MS),
+        ...(headers ? { headers } : {}),
+    });
+}
+
 async function callOnce(question, nContext = 4) {
     const payload = { question, n_context: String(nContext) };
-    const token = accessToken || await authenticate();
     let res;
-    try {
-        res = await axios.post(AGENT_URL, payload, {
-            timeout: Number(AGENT_TIMEOUT_MS),
-            headers: { Authorization: `Bearer ${token}` },
-        });
-    } catch (error) {
-        if (error.response?.status !== 401) throw error;
-        accessToken = null;
-        const renewedToken = await authenticate();
-        res = await axios.post(AGENT_URL, payload, {
-            timeout: Number(AGENT_TIMEOUT_MS),
-            headers: { Authorization: `Bearer ${renewedToken}` },
-        });
+
+    if (!authEnabled) {
+        res = await postQuestion(payload);
+    } else {
+        const token = accessToken || await authenticate();
+        try {
+            res = await postQuestion(payload, token);
+        } catch (error) {
+            if (error.response?.status !== 401) throw error;
+            accessToken = null;
+            res = await postQuestion(payload, await authenticate());
+        }
     }
-    // Estructura que nos mostraste:
-    // { status: "success", data: { answer: "...", sources: [...] } }
+
     const ok = res.data?.status === "success";
     const answer = res.data?.data?.answer;
     if (!ok || !answer) {
@@ -66,10 +73,13 @@ export async function askAgent(question, { nContext = 4 } = {}) {
             return await callOnce(question, nContext);
         } catch (err) {
             lastErr = err;
-            const wait = (Number(RETRY_BASE_MS) * (attempt + 1));
-            logger.error({ err: err?.response?.data || err.message, attempt, wait }, "Agent error");
+            const wait = Number(RETRY_BASE_MS) * (attempt + 1);
+            logger.error(
+                { err: err?.response?.data || err.message, attempt, wait },
+                "Agent error",
+            );
             if (attempt === Number(RETRY_ATTEMPTS)) break;
-            await new Promise(r => setTimeout(r, wait));
+            await new Promise((resolve) => setTimeout(resolve, wait));
             attempt++;
         }
     }
