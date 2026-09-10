@@ -5,6 +5,8 @@
 
 # WhatsApp/browser runtime data
 .sessions/
+.wwebjs_auth/
+.wwebjs_cache/
 .node-persist/
 
 # Dependencies and builds

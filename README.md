@@ -1,8 +1,11 @@
 # WhatsApp Relay UTM
 
-Servicio Node.js que conecta WhatsApp con el agente RAG de la UTM y expone una API para el panel web.
+Servicio Node.js basado en `whatsapp-web.js` que conecta WhatsApp con el agente RAG de la UTM y expone una API protegida para el panel web.
 
-## Configuración
+## Requisitos y configuración
+
+- Node.js 18 o superior.
+- Google Chrome/Chromium disponible para Puppeteer.
 
 ```bash
 cp .env.example .env
@@ -32,18 +35,20 @@ para consultar `/rag/ask` y nunca se envían al navegador.
 Todas las rutas `/api/*` requieren `Authorization: Bearer <token>` y el rol
 `admin`. El endpoint `/health` permanece público para comprobaciones operativas.
 
-El frontend debe consultar el estado periódicamente. Cuando `qrAvailable` sea `true`, puede obtener el QR y asignar `data.qr` al atributo `src` de una imagen.
+El frontend debe consultar el estado periódicamente. Cuando `qrAvailable` sea
+`true`, puede obtener el QR y asignar `data.qr` al atributo `src` de una imagen.
 
 ```js
 const API_URL = "http://localhost:5005";
+const headers = { Authorization: `Bearer ${accessToken}` };
 
-await fetch(`${API_URL}/api/whatsapp/connect`, { method: "POST" });
+await fetch(`${API_URL}/api/whatsapp/connect`, { method: "POST", headers });
 
-const statusResponse = await fetch(`${API_URL}/api/whatsapp/status`);
+const statusResponse = await fetch(`${API_URL}/api/whatsapp/status`, { headers });
 const { data: status } = await statusResponse.json();
 
 if (status.qrAvailable) {
-  const qrResponse = await fetch(`${API_URL}/api/whatsapp/qr`);
+  const qrResponse = await fetch(`${API_URL}/api/whatsapp/qr`, { headers });
   const { data } = await qrResponse.json();
   document.querySelector("#whatsapp-qr").src = data.qr;
 }
@@ -54,9 +59,16 @@ Para enviar mensajes, `to` puede ser un número internacional o un identificador
 ```js
 await fetch(`${API_URL}/api/send-text`, {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: {
+    ...headers,
+    "Content-Type": "application/json",
+  },
   body: JSON.stringify({ to: "593999999999", body: "Hola" }),
 });
 ```
 
-Los archivos `.env`, `.sessions/` y `.node-persist/` son datos locales y no deben subirse al repositorio.
+Los archivos `.env`, `.sessions/`, `.wwebjs_auth/` y `.wwebjs_cache/` son
+datos locales y no deben subirse al repositorio.
+
+> `whatsapp-web.js` es un cliente no oficial. Su uso no elimina el riesgo de
+> desconexiones o restricciones por parte de WhatsApp.

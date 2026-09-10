@@ -4,7 +4,7 @@ import cors from "cors";
 import fs from "fs";
 import jwt from "jsonwebtoken";
 import logger from "./logger.js";
-import { getWAStatus, getLatestQR, initWA, markDisconnected } from "./wa.js";
+import { disconnectWA, getWAStatus, getLatestQR, initWA } from "./wa.js";
 import { errorHandler } from "./middlewares/error.js";
 
 const {
@@ -38,6 +38,7 @@ app.use(express.json({ limit: "100kb" }));
 
 let wa = null;
 let waStartPromise = null;
+let waGeneration = 0;
 
 function readPublicKey() {
     if (JWT_PUBLIC_KEY) return JWT_PUBLIC_KEY.replace(/\\n/g, "\n");
@@ -69,27 +70,33 @@ function adminRequired(req, _res, next) {
 }
 
 function startWA() {
-    if (wa) return Promise.resolve(wa);
+    const status = getWAStatus().status;
+    if (wa && !["idle", "disconnected", "error"].includes(status)) {
+        return Promise.resolve(wa);
+    }
     if (waStartPromise) return waStartPromise;
 
-    waStartPromise = initWA(async () => {
-        wa = null;
-        waStartPromise = null;
-        try {
-            await startWA();
-        } catch (error) {
-            logger.error({ err: error.message }, "No se pudo reiniciar Open-WA");
+    const generation = ++waGeneration;
+    const currentPromise = initWA(() => {
+        if (generation === waGeneration) {
+            wa = null;
+            waStartPromise = null;
         }
     })
         .then((instance) => {
-            wa = instance;
+            if (generation === waGeneration) wa = instance;
             return instance;
         })
+        .catch((error) => {
+            if (generation === waGeneration) wa = null;
+            throw error;
+        })
         .finally(() => {
-            waStartPromise = null;
+            if (waStartPromise === currentPromise) waStartPromise = null;
         });
 
-    return waStartPromise;
+    waStartPromise = currentPromise;
+    return currentPromise;
 }
 
 function normalizeChatId(value) {
@@ -104,6 +111,7 @@ function normalizeChatId(value) {
 app.get("/", (_req, res) => res.json({
     ok: true,
     service: "whatsapp-relay",
+    provider: "whatsapp-web.js",
     api: "/api/whatsapp/status",
 }));
 
@@ -112,6 +120,7 @@ app.get("/health", (_req, res) => {
     res.json({
         ok: true,
         service: "whatsapp-relay",
+        provider: "whatsapp-web.js",
         waOnline: whatsapp.status === "connected",
         whatsapp,
         ts: new Date().toISOString(),
@@ -140,12 +149,12 @@ app.get("/api/whatsapp/qr", (_req, res) => {
 
 app.post("/api/whatsapp/connect", (_req, res) => {
     const status = getWAStatus();
-    if (status.status === "connected") {
+    if (["connected", "authenticated", "initializing", "waiting_qr"].includes(status.status)) {
         return res.json({ ok: true, data: status });
     }
 
     void startWA().catch((error) => {
-        logger.error({ err: error.message }, "No se pudo iniciar Open-WA");
+        logger.error({ err: error.message }, "No se pudo iniciar whatsapp-web.js");
     });
 
     return res.status(202).json({
@@ -157,13 +166,10 @@ app.post("/api/whatsapp/connect", (_req, res) => {
 
 app.post("/api/whatsapp/disconnect", async (_req, res, next) => {
     try {
-        if (wa?.client) {
-            await wa.client.logout();
-            await wa.client.kill();
-        }
-        wa = null;
+        waGeneration += 1;
         waStartPromise = null;
-        markDisconnected();
+        wa = null;
+        await disconnectWA({ logout: true });
         return res.json({ ok: true, data: getWAStatus() });
     } catch (error) {
         return next(error);
@@ -186,7 +192,7 @@ app.post("/api/send-text", async (req, res, next) => {
             error.status = 400;
             throw error;
         }
-        if (!wa) {
+        if (!wa || getWAStatus().status !== "connected") {
             const error = new Error("WhatsApp todavía no está conectado");
             error.status = 503;
             throw error;
@@ -194,8 +200,8 @@ app.post("/api/send-text", async (req, res, next) => {
 
         await wa.sendText(chatId, message);
         return res.json({ ok: true, data: { to: chatId } });
-    } catch (err) {
-        return next(err);
+    } catch (error) {
+        return next(error);
     }
 });
 
@@ -203,19 +209,22 @@ app.use((_req, res) => res.status(404).json({ ok: false, error: "Ruta no encontr
 app.use(errorHandler);
 
 app.listen(Number(PORT), HOST, () => {
-    logger.info(`[WA Relay] HTTP ON: http://${HOST}:${PORT}`);
+    logger.info(`[WhatsApp Relay] HTTP ON: http://${HOST}:${PORT}`);
     if (AUTO_START === "true") {
         void startWA().catch((error) => {
-            logger.error({ err: error.message }, "Failed to start Open-WA");
+            logger.error({ err: error.message }, "Failed to start whatsapp-web.js");
         });
     }
 });
 
-process.on("SIGINT", () => {
-    logger.warn("Recibido SIGINT. Cerrando...");
-    process.exit(0);
-});
-process.on("SIGTERM", () => {
-    logger.warn("Recibido SIGTERM. Cerrando...");
-    process.exit(0);
-});
+async function shutdown(signal) {
+    logger.warn({ signal }, "Cerrando el servicio...");
+    try {
+        await disconnectWA({ logout: false });
+    } finally {
+        process.exit(0);
+    }
+}
+
+process.once("SIGINT", () => void shutdown("SIGINT"));
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
